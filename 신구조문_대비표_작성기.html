@@ -1,0 +1,803 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>공식 규정 신구조문 대비표 및 개정안 자동 작성기</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Google Diff Match Patch (텍스트 비교 알고리즘) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/diff_match_patch/20121119/diff_match_patch.js"></script>
+    
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+
+    <style>
+        @import url('https://cdn.jsdelivr.net/npm/galmuri@latest/dist/galmuri.css');
+
+        /* 커스텀 스크롤바 */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb { background: #c1c1c1; border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: #a8a8a8; }
+        
+        .word-break-keep { word-break: keep-all; }
+
+        /* 공무원 공식 서식 스타일 (웹 미리보기용) */
+        .official-format {
+            font-family: 'Hamchorom Batang', '함초롬바탕', 'Batang', serif;
+            font-size: 11pt;
+            letter-spacing: -0.05em;
+            line-height: 1.6; 
+        }
+        
+        /* contentEditable 아웃라인 제거 */
+        [contenteditable="true"]:focus {
+            outline: 2px solid #93c5fd;
+            background-color: #f8fafc;
+            border-radius: 2px;
+        }
+    </style>
+</head>
+<body class="bg-slate-100 text-gray-800 font-sans">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        function App() {
+            // 상태 관리
+            const [oldText, setOldText] = useState("");
+            const [newText, setNewText] = useState("");
+            const [ruleName, setRuleName] = useState(""); // 규정명
+            const [draftType, setDraftType] = useState("개정"); // 입안형태 (기본값: 개정)
+            const [mainContent, setMainContent] = useState("");
+            const [rows, setRows] = useState([]);
+            const [isGenerating, setIsGenerating] = useState(false);
+
+            // 아이콘 렌더링을 위한 Effect
+            useEffect(() => {
+                if (window.lucide) {
+                    window.lucide.createIcons();
+                }
+            }, [rows]);
+
+            // HTML 특수문자 이스케이프
+            const escapeHtml = (text) => {
+                if (!text) return "";
+                return text
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;")
+                    .replace(/'/g, "&#039;");
+            };
+
+            // HTML 이스케이프 해제
+            const unescapeHtml = (text) => {
+                if (!text) return "";
+                return text
+                    .replace(/&amp;/g, "&")
+                    .replace(/&lt;/g, "<")
+                    .replace(/&gt;/g, ">")
+                    .replace(/&quot;/g, '"')
+                    .replace(/&#039;/g, "'");
+            };
+
+            // 요약 텍스트 생성 (구체적인 내용 추출)
+            const getTruncatedText = (text) => {
+                if (!text) return "";
+                const t = text.trim().replace(/\s+/g, ' '); // 다중 공백을 하나로
+                return t.length > 35 ? t.substring(0, 35) + '...' : t;
+            };
+
+            // 수정된 텍스트 부분의 인라인 비교
+            const getInlineDiffHtml = (leftLine, rightLine, dmp) => {
+                if (!leftLine) {
+                    return { 
+                        leftHtml: '<span style="color:#1a73e8;">&lt;신설&gt;</span>', 
+                        rightHtml: `<span style="font-weight:bold; text-decoration:underline; color:#1a73e8;">${escapeHtml(rightLine)}</span>`,
+                        notes: [`▶ '${getTruncatedText(rightLine)}' 신설`]
+                    };
+                }
+                if (!rightLine) {
+                    return { 
+                        leftHtml: `<span style="font-weight:bold; text-decoration:underline; color:#d93025;">${escapeHtml(leftLine)}</span>`, 
+                        rightHtml: `<span style="font-weight:bold; text-decoration:underline; color:#d93025;">&lt;삭제&gt;</span>`,
+                        notes: [`▶ '${getTruncatedText(leftLine)}' 삭제`]
+                    };
+                }
+
+                const diffs = dmp.diff_main(leftLine, rightLine);
+                dmp.diff_cleanupSemantic(diffs);
+
+                let leftHtml = '';
+                let rightHtml = '';
+                const notesSet = new Set();
+
+                for (let i = 0; i < diffs.length; i++) {
+                    const op = diffs[i][0];
+                    const text = diffs[i][1];
+                    const safeText = escapeHtml(text);
+
+                    if (op === 0) {
+                        leftHtml += safeText;
+                        rightHtml += safeText;
+                    } else if (op === -1) {
+                        if (i + 1 < diffs.length && diffs[i+1][0] === 1) {
+                            const nextText = diffs[i+1][1];
+                            leftHtml += `<span style="font-weight:bold; text-decoration:underline; color:#d93025;">${safeText}</span>`;
+                            rightHtml += `<span style="font-weight:bold; text-decoration:underline; color:#1a73e8;">${escapeHtml(nextText)}</span>`;
+                            
+                            if (text.replace(/\s+/g, '') === nextText.replace(/\s+/g, '')) {
+                                notesSet.add("▶ 띄어쓰기 수정");
+                            } else {
+                                notesSet.add(`▶ '${getTruncatedText(text)}' -> '${getTruncatedText(nextText)}' 수정`);
+                            }
+                            i++; 
+                        } else {
+                            leftHtml += `<span style="font-weight:bold; text-decoration:underline; color:#d93025;">${safeText}</span>`;
+                            rightHtml += `<span style="font-weight:bold; text-decoration:underline; color:#d93025;">&lt;삭제&gt;</span>`;
+                            if (text.trim() === '') notesSet.add("▶ 띄어쓰기 삭제");
+                            else notesSet.add(`▶ '${getTruncatedText(text)}' 삭제`);
+                        }
+                    } else if (op === 1) {
+                        if (i + 1 < diffs.length && diffs[i+1][0] === -1) {
+                            const nextText = diffs[i+1][1];
+                            leftHtml += `<span style="font-weight:bold; text-decoration:underline; color:#d93025;">${escapeHtml(nextText)}</span>`;
+                            rightHtml += `<span style="font-weight:bold; text-decoration:underline; color:#1a73e8;">${safeText}</span>`;
+                            
+                            if (text.replace(/\s+/g, '') === nextText.replace(/\s+/g, '')) {
+                                notesSet.add("▶ 띄어쓰기 수정");
+                            } else {
+                                notesSet.add(`▶ '${getTruncatedText(nextText)}' -> '${getTruncatedText(text)}' 수정`);
+                            }
+                            i++;
+                        } else {
+                            leftHtml += `<span style="color:#1a73e8;">&lt;신설&gt;</span>`;
+                            rightHtml += `<span style="font-weight:bold; text-decoration:underline; color:#1a73e8;">${safeText}</span>`;
+                            if (text.trim() === '') notesSet.add("▶ 띄어쓰기 신설");
+                            else notesSet.add(`▶ '${getTruncatedText(text)}' 신설`);
+                        }
+                    }
+                }
+
+                return { leftHtml, rightHtml, notes: Array.from(notesSet) };
+            };
+
+            // 접두어의 계층(유형)을 분석하여 동일한 수준의 번호끼리만 그룹화 및 문맥파악용
+            const getPrefixType = (p) => {
+                if (p.startsWith('제') && p.includes('조')) return 'jo';
+                if (p.startsWith('제') && p.includes('항')) return 'hang';
+                if (/[①-⑮]/.test(p)) return 'circle';
+                if (/\d+\./.test(p)) return 'num_dot';
+                if (/[가-하]\./.test(p)) return 'char_dot';
+                if (/\d+\)/.test(p)) return 'num_paren';
+                if (/[가-하]\)/.test(p)) return 'char_paren';
+                if (/^[▣□◈○●]/.test(p)) return 'symbol_heading';
+                return 'unknown';
+            };
+
+            const handleGenerate = () => {
+                if (!window.diff_match_patch) {
+                    alert("비교 엔진을 불러오는 중입니다. 잠시 후 다시 시도해주세요.");
+                    return;
+                }
+                setIsGenerating(true);
+
+                setTimeout(() => {
+                    try {
+                        const dmp = new diff_match_patch();
+                        const a = dmp.diff_linesToChars_(oldText.trim(), newText.trim());
+                        const lineText1 = a.chars1;
+                        const lineText2 = a.chars2;
+                        const lineArray = a.lineArray;
+
+                        const diffs = dmp.diff_main(lineText1, lineText2, false);
+                        dmp.diff_charsToLines_(diffs, lineArray);
+
+                        let newRows = [];
+                        let i = 0;
+
+                        // 공무원 문서 계층 구조 서열화 (▣ 특수기호 제목을 최상위 0레벨로 부여)
+                        const hierarchy = {
+                            'symbol_heading': 0,
+                            'jo': 1, 'hang': 2, 'circle': 3, 'num_dot': 4, 
+                            'char_dot': 5, 'num_paren': 6, 'char_paren': 7, 'unknown': 99
+                        };
+
+                        while (i < diffs.length) {
+                            const [op, text] = diffs[i];
+                            let lines = text.split('\n');
+                            if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+
+                            if (op === 0) { 
+                                // 변경 없는 구간 (op === 0) 에 대한 스마트 계층 그룹화
+                                let parsed = lines.map(line => {
+                                    const clean = line.replace(/\s+/g, '');
+                                    
+                                    // 1. 수동 입력 보호
+                                    if (clean.includes('(생략)') || clean.includes('현행과동일')) {
+                                        return { bypass: true, text: line };
+                                    }
+                                    
+                                    // 2. 특수기호 단독/제목 감지 (예: ▣ 정책(Policy), ▣ 정의(Definition))
+                                    const symbolHeadingRegex = /^(\s*)([▣□◈○●]\s*[^\n]+)/;
+                                    const symbolMatch = line.match(symbolHeadingRegex);
+                                    if (symbolMatch) {
+                                        return { isPrefix: true, whitespace: symbolMatch[1], prefix: symbolMatch[2].trim(), text: line, type: 'symbol_heading' };
+                                    }
+
+                                    // 3. 순수 범위(8.~9.) 감지
+                                    const prefixPattern = "(?:제\\d+조(?:의\\d+)?|제\\d+항|①|②|③|④|⑤|⑥|⑦|⑧|⑨|⑩|⑪|⑫|⑬|⑭|⑮|\\d+\\.|[가-하]\\.|\\d+\\)|[가-하]\\))";
+                                    const pureRangeRegex = new RegExp(`^(\\s*)(${prefixPattern}\\s*[~∼〜-]\\s*${prefixPattern})\\s*$`);
+                                    const rangeMatch = line.match(pureRangeRegex);
+                                    if (rangeMatch) {
+                                        return { isPureRange: true, whitespace: rangeMatch[1], rangeText: rangeMatch[2], text: line };
+                                    }
+
+                                    // 4. 일반 조항 접두어 감지
+                                    const prefixRegex = /^(\s*)(제\d+조(?:의\d+)?|제\d+항|①|②|③|④|⑤|⑥|⑦|⑧|⑨|⑩|⑪|⑫|⑬|⑭|⑮|\d+\.|[가-하]\.|\d+\)|[가-하]\))/;
+                                    const match = line.match(prefixRegex);
+                                    if (match) {
+                                        return { isPrefix: true, whitespace: match[1], prefix: match[2], text: line, type: getPrefixType(match[2]) };
+                                    }
+                                    
+                                    return { isPrefix: false, text: line };
+                                });
+
+                                // [핵심] 변경 구간 직전의 상위 번호를 Context로 분리
+                                if (i < diffs.length - 1) {
+                                    let currentAncestorLevel = 999;
+                                    for (let j = parsed.length - 1; j >= 0; j--) {
+                                        if (parsed[j].bypass || parsed[j].isPureRange) continue;
+                                        if (parsed[j].isPrefix) {
+                                            const level = hierarchy[parsed[j].type] || 99;
+                                            if (level < currentAncestorLevel) {
+                                                parsed[j].isContext = true;
+                                                currentAncestorLevel = level;
+                                            }
+                                        }
+                                    }
+                                }
+
+                                let j = 0;
+                                while (j < parsed.length) {
+                                    let p = parsed[j];
+                                    
+                                    if (p.bypass) {
+                                        let left = p.text;
+                                        let right = p.text;
+                                        const clean = p.text.replace(/\s+/g, '');
+                                        if (clean.includes('현행과동일')) {
+                                            left = left.replace(/\(현행과\s*동일\)/g, '(생략)').replace(/\(현행과동일\)/g, '(생략)');
+                                        } else if (clean.includes('(생략)')) {
+                                            right = right.replace(/\(생략\)/g, '(현행과 동일)');
+                                        }
+                                        newRows.push({
+                                            id: Math.random().toString(36).substr(2, 9),
+                                            leftHtml: escapeHtml(left),
+                                            rightHtml: escapeHtml(right),
+                                            noteHtml: ''
+                                        });
+                                        j++;
+                                    } else if (p.isPureRange) {
+                                        newRows.push({
+                                            id: Math.random().toString(36).substr(2, 9),
+                                            leftHtml: `${escapeHtml(p.whitespace)}${escapeHtml(p.rangeText)}(생략)`,
+                                            rightHtml: `${escapeHtml(p.whitespace)}${escapeHtml(p.rangeText)}(현행과 동일)`,
+                                            noteHtml: ''
+                                        });
+                                        j++;
+                                    } else if (!p.isPrefix || p.isContext) {
+                                        if (p.isContext) {
+                                            newRows.push({
+                                                id: Math.random().toString(36).substr(2, 9),
+                                                leftHtml: `${escapeHtml(p.whitespace)}${escapeHtml(p.prefix)}(생략)`,
+                                                rightHtml: `${escapeHtml(p.whitespace)}${escapeHtml(p.prefix)}(현행과 동일)`,
+                                                noteHtml: ''
+                                            });
+                                        } else {
+                                            if (p.text.trim() !== '') {
+                                                newRows.push({
+                                                    id: Math.random().toString(36).substr(2, 9),
+                                                    leftHtml: escapeHtml(p.text),
+                                                    rightHtml: escapeHtml(p.text),
+                                                    noteHtml: ''
+                                                });
+                                            }
+                                        }
+                                        j++;
+                                    } else {
+                                        let k = j;
+                                        let firstPrefix = parsed[k].prefix;
+                                        let firstType = parsed[k].type;
+                                        let firstWhitespace = parsed[k].whitespace;
+                                        let lastPrefixOfSameType = firstPrefix;
+
+                                        while (k < parsed.length && !parsed[k].isContext && !parsed[k].bypass && !parsed[k].isPureRange) {
+                                            if (parsed[k].isPrefix) {
+                                                const currentLevel = hierarchy[parsed[k].type] || 99;
+                                                const firstLevel = hierarchy[firstType] || 99;
+                                                
+                                                if (currentLevel < firstLevel) {
+                                                    break; 
+                                                } else if (currentLevel === firstLevel) {
+                                                    lastPrefixOfSameType = parsed[k].prefix; 
+                                                }
+                                            }
+                                            k++;
+                                        }
+
+                                        if (firstPrefix !== lastPrefixOfSameType) {
+                                            newRows.push({
+                                                id: Math.random().toString(36).substr(2, 9),
+                                                leftHtml: `${escapeHtml(firstWhitespace)}${escapeHtml(firstPrefix)}~${escapeHtml(lastPrefixOfSameType)}(생략)`,
+                                                rightHtml: `${escapeHtml(firstWhitespace)}${escapeHtml(firstPrefix)}~${escapeHtml(lastPrefixOfSameType)}(현행과 동일)`,
+                                                noteHtml: ''
+                                            });
+                                        } else {
+                                            newRows.push({
+                                                id: Math.random().toString(36).substr(2, 9),
+                                                leftHtml: `${escapeHtml(firstWhitespace)}${escapeHtml(firstPrefix)}(생략)`,
+                                                rightHtml: `${escapeHtml(firstWhitespace)}${escapeHtml(firstPrefix)}(현행과 동일)`,
+                                                noteHtml: ''
+                                            });
+                                        }
+                                        j = k;
+                                    }
+                                }
+                                i++;
+                            } else if (op === -1) { 
+                                if (i + 1 < diffs.length && diffs[i+1][0] === 1) { 
+                                    const insertText = diffs[i+1][1];
+                                    let insertLines = insertText.split('\n');
+                                    if (insertLines.length > 0 && insertLines[insertLines.length - 1] === '') insertLines.pop();
+
+                                    const maxLines = Math.max(lines.length, insertLines.length);
+                                    for (let j = 0; j < maxLines; j++) {
+                                        const leftLine = lines[j];
+                                        const rightLine = insertLines[j];
+
+                                        const leftClean = (leftLine || '').replace(/\s+/g, '');
+                                        const rightClean = (rightLine || '').replace(/\s+/g, '');
+                                        const isOmittedLeft = leftClean.includes('(생략)') || leftClean.includes('현행과동일');
+                                        const isOmittedRight = rightClean.includes('(생략)') || rightClean.includes('현행과동일');
+
+                                        if (isOmittedLeft || isOmittedRight) {
+                                            newRows.push({ 
+                                                id: Math.random().toString(36).substr(2, 9),
+                                                leftHtml: leftLine ? escapeHtml(leftLine) : '', 
+                                                rightHtml: rightLine ? escapeHtml(rightLine) : '', 
+                                                noteHtml: '' 
+                                            });
+                                            continue;
+                                        }
+
+                                        if (leftLine !== undefined && rightLine !== undefined) {
+                                            const result = getInlineDiffHtml(leftLine, rightLine, dmp);
+                                            newRows.push({ 
+                                                id: Math.random().toString(36).substr(2, 9),
+                                                leftHtml: result.leftHtml, 
+                                                rightHtml: result.rightHtml, 
+                                                noteHtml: result.notes.join('<br/>') 
+                                            });
+                                        } else if (leftLine !== undefined && rightLine === undefined) {
+                                            newRows.push({ 
+                                                id: Math.random().toString(36).substr(2, 9), 
+                                                leftHtml: `<span style="font-weight:bold; text-decoration:underline; color:#d93025;">${escapeHtml(leftLine)}</span>`, 
+                                                rightHtml: `<span style="font-weight:bold; text-decoration:underline; color:#d93025;">&lt;삭제&gt;</span>`, 
+                                                noteHtml: `▶ '${getTruncatedText(leftLine)}' 삭제` 
+                                            });
+                                        } else if (leftLine === undefined && rightLine !== undefined) {
+                                            newRows.push({ 
+                                                id: Math.random().toString(36).substr(2, 9), 
+                                                leftHtml: `<span style="color:#1a73e8;">&lt;신설&gt;</span>`, 
+                                                rightHtml: `<span style="font-weight:bold; text-decoration:underline; color:#1a73e8;">${escapeHtml(rightLine)}</span>`, 
+                                                noteHtml: `▶ '${getTruncatedText(rightLine)}' 신설` 
+                                            });
+                                        }
+                                    }
+                                    i += 2;
+                                } else {
+                                    lines.forEach(line => {
+                                        if(line.trim() === '') return;
+                                        const clean = line.replace(/\s+/g, '');
+                                        if (clean.includes('(생략)') || clean.includes('현행과동일')) {
+                                            newRows.push({
+                                                id: Math.random().toString(36).substr(2, 9),
+                                                leftHtml: escapeHtml(line),
+                                                rightHtml: '',
+                                                noteHtml: ''
+                                            });
+                                            return;
+                                        }
+                                        newRows.push({ 
+                                            id: Math.random().toString(36).substr(2, 9), 
+                                            leftHtml: `<span style="font-weight:bold; text-decoration:underline; color:#d93025;">${escapeHtml(line)}</span>`, 
+                                            rightHtml: `<span style="font-weight:bold; text-decoration:underline; color:#d93025;">&lt;삭제&gt;</span>`, 
+                                            noteHtml: `▶ '${getTruncatedText(line)}' 삭제` 
+                                        });
+                                    });
+                                    i++;
+                                }
+                            } else if (op === 1) { 
+                                lines.forEach(line => {
+                                    if(line.trim() === '') return;
+                                    const clean = line.replace(/\s+/g, '');
+                                    if (clean.includes('(생략)') || clean.includes('현행과동일')) {
+                                        newRows.push({
+                                            id: Math.random().toString(36).substr(2, 9),
+                                            leftHtml: '',
+                                            rightHtml: escapeHtml(line),
+                                            noteHtml: ''
+                                        });
+                                        return;
+                                    }
+                                    newRows.push({ 
+                                        id: Math.random().toString(36).substr(2, 9), 
+                                        leftHtml: `<span style="color:#1a73e8;">&lt;신설&gt;</span>`, 
+                                        rightHtml: `<span style="font-weight:bold; text-decoration:underline; color:#1a73e8;">${escapeHtml(line)}</span>`, 
+                                        noteHtml: `▶ '${getTruncatedText(line)}' 신설` 
+                                    });
+                                });
+                                i++;
+                            }
+                        }
+
+                        // [자동화 기능] 비고란의 내용들을 추출하여 "주요내용"에 ○ 형태로 자동 정리
+                        let allSummaryNotes = [];
+                        newRows.forEach(row => {
+                            if (row.noteHtml) {
+                                const notes = row.noteHtml.split('<br/>');
+                                notes.forEach(note => {
+                                    const trimmed = note.trim();
+                                    if (trimmed) {
+                                        let unescapedNote = unescapeHtml(trimmed);
+                                        allSummaryNotes.push(unescapedNote.replace(/^▶\s*/, '○ '));
+                                    }
+                                });
+                            }
+                        });
+
+                        const uniqueNotes = [...new Set(allSummaryNotes)];
+                        if (uniqueNotes.length > 0) {
+                            setMainContent(uniqueNotes.join('\n'));
+                        }
+
+                        setRows(newRows);
+                    } catch (e) {
+                        console.error(e);
+                        alert("대비표 생성 중 오류가 발생했습니다.");
+                    } finally {
+                        setIsGenerating(false);
+                    }
+                }, 50);
+            };
+
+            const exportWord = () => {
+                const tableContainer = document.getElementById('diff-table-body');
+                if (!tableContainer) return;
+
+                // 워드용 들여쓰기 보존을 위해 앞 스페이스바를 &nbsp;로 치환하는 함수
+                const processForWord = (html) => {
+                    if (!html) return '';
+                    let processed = html.replace(/\n/g, '<br/>');
+                    processed = processed.replace(/(?:^|<br\s*\/?>)( +)/g, (match) => {
+                        const brPart = match.match(/^<br\s*\/?>/) ? match.match(/^<br\s*\/?>/)[0] : '';
+                        const spaces = match.replace(/^<br\s*\/?>/, '');
+                        return brPart + '&nbsp;'.repeat(spaces.length * 2); // 들여쓰기 크기 강조를 위해 * 2
+                    });
+                    return processed;
+                };
+
+                const trElements = tableContainer.querySelectorAll('tr');
+                let tableHtml = '';
+
+                // 가로줄 숨김 (border-top, border-bottom: none 처리)
+                trElements.forEach((tr, index) => {
+                    const tds = tr.querySelectorAll('td');
+                    const isLast = index === trElements.length - 1;
+                    const bottomBorder = isLast ? '1px solid black' : 'none'; // 마지막 줄만 테두리 닫아줌
+                    
+                    if (tds.length === 3) {
+                        tableHtml += `
+                            <tr>
+                                <td style="border-left: 1px solid black; border-right: 1px solid black; border-top: none; border-bottom: ${bottomBorder}; padding: 3px 5px; vertical-align: top; width: 42.5%;" class="official-style">${processForWord(tds[0].innerHTML)}</td>
+                                <td style="border-left: 1px solid black; border-right: 1px solid black; border-top: none; border-bottom: ${bottomBorder}; padding: 3px 5px; vertical-align: top; width: 42.5%;" class="official-style">${processForWord(tds[1].innerHTML)}</td>
+                                <td style="border-left: 1px solid black; border-right: 1px solid black; border-top: none; border-bottom: ${bottomBorder}; padding: 3px 5px; vertical-align: top; width: 15%;" class="official-style">${processForWord(tds[2].innerHTML)}</td>
+                            </tr>
+                        `;
+                    }
+                });
+                
+                const formattedRuleName = escapeHtml(ruleName).replace(/\n/g, '<br/>');
+                const formattedMainContent = escapeHtml(mainContent).replace(/\n/g, '<br/>');
+                const safeDraftType = escapeHtml(draftType) || '개정';
+
+                // 단락 앞뒤 공백 완전 제거 (mso-para-margin 등 강력 적용)
+                const wordContent = `
+                    <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+                    <head>
+                        <meta charset='utf-8'>
+                        <title>규정 개정(안)</title>
+                        <style>
+                            @page WordSection1 {
+                                size: 841.9pt 595.3pt; /* A4 가로 (Landscape) */
+                                mso-page-orientation: landscape;
+                                margin: 0.8in 0.8in 0.8in 0.8in;
+                            }
+                            div.WordSection1 { page: WordSection1; }
+                            
+                            body, table, td, th, span, div { 
+                                font-family: '함초롬바탕', 'Hamchorom Batang', 'Batang', serif !important; 
+                                color: #000000; 
+                                margin: 0;
+                                padding: 0;
+                            }
+                            
+                            /* MS Word 단락 공백 제거 특수 속성 */
+                            p.MsoNormal, li.MsoNormal, div.MsoNormal, p {
+                                margin-top: 0in !important;
+                                margin-right: 0in !important;
+                                margin-bottom: .0001pt !important;
+                                margin-left: 0in !important;
+                                mso-para-margin: 0in !important;
+                                mso-para-margin-bottom: .0001pt !important;
+                                padding: 0 !important;
+                                line-height: 100% !important;
+                                mso-line-height-rule: exactly;
+                            }
+                            
+                            table { border-collapse: collapse; width: 100%; table-layout: fixed; margin-bottom: 20px; }
+                            th, td { border: 1px solid #000; padding: 5px; line-height: 100% !important; mso-line-height-rule: exactly; }
+                            th { background-color: #f2f2f2; text-align: center; font-weight: bold; font-size: 11pt; }
+                            
+                            .official-style {
+                                font-family: '함초롬바탕', 'Hamchorom Batang', 'Batang', serif !important;
+                                font-size: 11.0pt;
+                                line-height: 100% !important; 
+                                mso-line-height-rule: exactly;
+                                letter-spacing: -0.5pt;
+                                word-break: keep-all;
+                            }
+                        </style>
+                    </head>
+                    <body>
+                        <div class="WordSection1">
+                            <!-- 요약 정보 테이블 -->
+                            <table style="border: 1px solid black; margin-bottom: 5px;">
+                                <tr>
+                                    <th style="width: 12%; text-align: center;">규정명</th>
+                                    <td style="width: 63%; font-weight: bold; vertical-align: middle;">
+                                        <p>${formattedRuleName || ''}</p>
+                                    </td>
+                                    <th style="width: 12%; text-align: center;">입안형태</th>
+                                    <td style="width: 13%; text-align: center; vertical-align: middle;">
+                                        <p>${safeDraftType}</p>
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <th style="text-align: center; vertical-align: middle;">주요내용</th>
+                                    <td colspan="3" style="padding: 10px 5px; line-height: 1.5 !important;">
+                                        <p style="line-height: 1.5 !important;">${formattedMainContent || ''}</p>
+                                    </td>
+                                </tr>
+                            </table>
+                            
+                            <!-- 신구조문 대비표 -->
+                            <table style="border: 1px solid black;">
+                                <thead>
+                                    <tr>
+                                        <th style="width: 42.5%; text-align: center;">현행 규정</th>
+                                        <th style="width: 42.5%; text-align: center;">개정(안)</th>
+                                        <th style="width: 15%; text-align: center;">비 고</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${tableHtml}
+                                </tbody>
+                            </table>
+                        </div>
+                    </body>
+                    </html>
+                `;
+
+                const blob = new Blob(['\ufeff', wordContent], { type: 'application/msword' });
+                const url = URL.createObjectURL(blob);
+                const link = document.createElement('a');
+                link.href = url;
+                link.download = `${ruleName || '신구조문대비표'}_${safeDraftType}안.doc`;
+                document.body.appendChild(link);
+                link.click();
+                document.body.removeChild(link);
+            };
+
+            return (
+                <div className="min-h-screen pb-20">
+                    <header className="bg-white shadow-sm sticky top-0 z-10">
+                        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-4 flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <i data-lucide="scale" className="text-blue-600 w-8 h-8"></i>
+                                <h1 className="text-2xl font-bold text-gray-800 tracking-tight">공식 규정 신구조문 대비표 작성기</h1>
+                            </div>
+                            {rows.length > 0 && (
+                                <button
+                                    onClick={exportWord}
+                                    className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-white px-5 py-2.5 rounded-lg font-medium transition shadow-sm"
+                                >
+                                    <i data-lucide="file-down" className="w-5 h-5"></i>
+                                    Word 다운로드
+                                </button>
+                            )}
+                        </div>
+                    </header>
+
+                    <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-8 space-y-8">
+                        
+                        {/* 기안서 / 개정이유 작성 영역 */}
+                        <section className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                            <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+                                <i data-lucide="file-text" className="w-5 h-5 text-gray-500"></i>
+                                기안서 정보 입력
+                            </h2>
+                            <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
+                                <div className="md:col-span-3">
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">1. 규정명</label>
+                                    <input
+                                        type="text"
+                                        className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-gray-50 text-[15px]"
+                                        placeholder="규정명을 입력하세요. (예: 인사규정)"
+                                        value={ruleName}
+                                        onChange={(e) => setRuleName(e.target.value)}
+                                    />
+                                </div>
+                                <div className="md:col-span-1">
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">2. 입안형태</label>
+                                    <input
+                                        type="text"
+                                        className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none bg-gray-50 text-[15px]"
+                                        placeholder="예: 개정, 제정"
+                                        value={draftType}
+                                        onChange={(e) => setDraftType(e.target.value)}
+                                    />
+                                </div>
+                                <div className="md:col-span-4">
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">
+                                        3. 주요내용 <span className="text-blue-600 font-normal text-xs ml-2">(하단 대비표 자동 생성 시 요약 내역이 자동 채워집니다)</span>
+                                    </label>
+                                    <textarea
+                                        className="w-full h-32 p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none resize-none bg-gray-50 text-[15px]"
+                                        placeholder="개정되는 주요 조항 및 내용을 요약하여 기재하세요."
+                                        value={mainContent}
+                                        onChange={(e) => setMainContent(e.target.value)}
+                                    />
+                                </div>
+                            </div>
+                        </section>
+
+                        {/* 신구조문 텍스트 입력 영역 */}
+                        <section className="bg-white rounded-xl shadow-sm border border-gray-200 p-6">
+                            <h2 className="text-lg font-bold text-gray-800 mb-4 flex items-center gap-2">
+                                <i data-lucide="split-square-horizontal" className="w-5 h-5 text-gray-500"></i>
+                                규정 본문 입력 (복사/붙여넣기)
+                            </h2>
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-6">
+                                <div>
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">변경 전 (현행 규정)</label>
+                                    <textarea
+                                        className="w-full h-80 p-4 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none resize-none leading-relaxed text-[15px] font-mono"
+                                        placeholder="수정 전 규정 내용을 붙여넣으세요."
+                                        value={oldText}
+                                        onChange={(e) => setOldText(e.target.value)}
+                                    />
+                                </div>
+                                <div>
+                                    <label className="block text-sm font-semibold text-gray-700 mb-2">변경 후 (개정안)</label>
+                                    <textarea
+                                        className="w-full h-80 p-4 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none resize-none leading-relaxed text-[15px] font-mono"
+                                        placeholder="수정 후 규정 내용을 붙여넣으세요."
+                                        value={newText}
+                                        onChange={(e) => setNewText(e.target.value)}
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="flex flex-col items-center gap-3">
+                                <button
+                                    onClick={handleGenerate}
+                                    disabled={isGenerating || (!oldText.trim() && !newText.trim())}
+                                    className="flex items-center gap-2 px-10 py-3.5 bg-blue-600 text-white rounded-lg font-bold text-lg hover:bg-blue-700 transition disabled:opacity-50 disabled:cursor-not-allowed shadow-md w-full md:w-auto md:min-w-[320px] justify-center"
+                                >
+                                    {isGenerating ? (
+                                        <React.Fragment>
+                                            <i data-lucide="loader-2" className="w-6 h-6 animate-spin"></i>
+                                            대비표 알고리즘 분석 중...
+                                        </React.Fragment>
+                                    ) : (
+                                        <React.Fragment>
+                                            <i data-lucide="table-2" className="w-6 h-6"></i>
+                                            신구조문 대비표 자동 생성
+                                        </React.Fragment>
+                                    )}
+                                </button>
+                                <p className="text-sm text-gray-500">※ 생성 시 규정 원칙(삭제/신설/생략 등)이 자동 적용됩니다.</p>
+                            </div>
+                        </section>
+
+                        {/* 대비표 결과 미리보기 영역 */}
+                        {rows.length > 0 && (
+                            <section className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
+                                <div className="bg-blue-50 px-6 py-4 border-b border-blue-100 flex justify-between items-center">
+                                    <div className="flex items-center gap-2">
+                                        <i data-lucide="edit-3" className="w-5 h-5 text-blue-600"></i>
+                                        <h2 className="text-lg font-bold text-blue-900">
+                                            결과 미리보기 및 직접 편집
+                                        </h2>
+                                    </div>
+                                    <div className="text-sm text-blue-700 bg-blue-100 px-3 py-1.5 rounded-full font-medium shadow-sm">
+                                        💡 표의 텍스트를 클릭하여 비고(관련 법령, 조번호 수정 등)를 직접 작성 및 수정하세요.
+                                    </div>
+                                </div>
+                                
+                                <div className="p-6 overflow-x-auto">
+                                    <table className="w-full border-collapse border border-slate-400 table-fixed min-w-[900px]">
+                                        <thead>
+                                            <tr>
+                                                <th className="border border-slate-400 bg-slate-200 p-2.5 w-[42.5%] text-center font-bold text-[16px] text-gray-900">현행 규정</th>
+                                                <th className="border border-slate-400 bg-slate-200 p-2.5 w-[42.5%] text-center font-bold text-[16px] text-gray-900">개정(안)</th>
+                                                <th className="border border-slate-400 bg-slate-200 p-2.5 w-[15%] text-center font-bold text-[16px] text-gray-900">비고</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="diff-table-body">
+                                            {rows.map((row, idx) => {
+                                                const isLast = idx === rows.length - 1;
+                                                const rowClasses = isLast ? 'border-b border-slate-400' : 'border-b-0';
+                                                
+                                                return (
+                                                    <tr key={row.id} className="transition-colors hover:bg-slate-50">
+                                                        <td 
+                                                            className={`border-l border-r border-slate-400 p-3 align-top whitespace-pre-wrap word-break-keep official-format ${rowClasses}`} 
+                                                            contentEditable={true}
+                                                            suppressContentEditableWarning={true}
+                                                            dangerouslySetInnerHTML={{ __html: row.leftHtml || '&nbsp;' }} 
+                                                        />
+                                                        <td 
+                                                            className={`border-l border-r border-slate-400 p-3 align-top whitespace-pre-wrap word-break-keep official-format ${rowClasses}`} 
+                                                            contentEditable={true}
+                                                            suppressContentEditableWarning={true}
+                                                            dangerouslySetInnerHTML={{ __html: row.rightHtml || '&nbsp;' }} 
+                                                        />
+                                                        <td 
+                                                            className={`border-l border-r border-slate-400 p-3 align-top whitespace-pre-wrap word-break-keep official-format text-gray-600 bg-gray-50 focus:bg-white ${rowClasses}`} 
+                                                            contentEditable={true}
+                                                            suppressContentEditableWarning={true}
+                                                            dangerouslySetInnerHTML={{ __html: row.noteHtml || '' }}
+                                                        ></td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </section>
+                        )}
+                    </main>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
